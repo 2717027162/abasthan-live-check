@@ -1,5 +1,6 @@
-# 直播第四防线（Abasthan 常驻版）
+# 直播第四防线（Abasthan 常驻版）+ 微博动态巡查（2026-11-17 22:36 加，Aw 令“都试试”第二项）
 # 12 个号一个脚本查完：哨兵 4 个（坏坏哦小号/板栗饼/余霜/小钰）每 2 分钟查一轮，12 个号每 10 分钟全查一轮；开播才发邮件，没开播不发
+# 微博：8 个号每 10 分钟查一轮（跟直播全量同一轮），手机端 getIndex 接口，只 SUB+SUBP 就够；有新帖发邮件提醒
 # 原理：ttwid + profile/other 接口读 live_status（1=开播，0=没播）
 # 状态记在脚本同目录的 ab_live_state.json；只在“刚开播”时发一次邮件，开着就不重复发
 # 注意：状态记在容器里的 ab_live_state.json；服务重启/重新部署后状态可能丢，启动时会打印 state file 是否存在、几条
@@ -11,6 +12,7 @@
 # Abasthan 删了的环境变量在容器里清不掉，2026-11-17 AB_TEST_EMAIL 因此每轮误发测试邮件
 # AB_LOOP=1：常驻循环模式（Web Service 用，哨兵每 2 分钟一轮、全量每 10 分钟一轮）；不设则只跑一轮全量退出
 # 循环模式会同时起一个极简 HTTP 健康检查服务（0.0.0.0:$PORT，默认 8080，/ 和 /health 返回 ok），供平台探活；单轮模式不起
+# 微博 SUB/SUBP/_T_WM 从环境变量 AB_WEIBO_SUB / AB_WEIBO_SUBP / AB_WEIBO_TWM 读，绝不写进代码（仓库是公开的）
 
 TEST = False        # True：只打印、不真发邮件（测 12 个号能不能查完）；确认后改 False
 TEST_EMAIL = False  # True：额外发一封测试邮件，验证发信通不通；确认后改 False
@@ -37,6 +39,21 @@ ACCOUNTS = [
 REGISTER_URL = "https://ttwid.bytedance.com/ttwid/union/register/"
 FORMSUBMIT_URL = "https://formsubmit.co/ajax/" + ALERT_EMAIL
 
+# 微博动态巡查（2026-11-17 22:36 加）：8 个号，手机端 getIndex 接口
+WEIBO_ACCOUNTS = [
+    ("余霜YSCandice", "1907518591"),
+    ("小钰_Hilda", "1779654914"),
+    ("解说Kitty", "7596025298"),
+    ("潮汐海灵小桃人", "6911598452"),
+    ("小珠桃子一米七", "1885411364"),
+    ("柏崎奈肉", "8330657003"),
+    ("宝石之星露比拉布拉", "6649052727"),
+    ("喵喵喵喵king", "7544111288"),
+]
+WEIBO_NIGHT_ONLY = {"1907518591", "1779654914"}  # 夜间 02:00-08:30 只查余霜/小钰（跟动态线夜里规则一致）
+WEIBO_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+WEIBO_TIME_BUDGET = 45  # 秒，微博一轮查到这里就停
+
 import json
 import os
 import time
@@ -52,6 +69,13 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ab_live_state.json")
 ALERT_EMAIL = os.environ.get("ALERT_EMAIL", ALERT_EMAIL)
 FORMSUBMIT_URL = "https://formsubmit.co/ajax/" + ALERT_EMAIL
+
+# 微博状态文件 + 登录态（环境变量，绝不写进代码；没设 AB_WEIBO_SUB 时微博巡查自动跳过，不影响直播）
+WEIBO_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ab_weibo_state.json")
+WB_SUB = os.environ.get("AB_WEIBO_SUB", "")
+WB_SUBP = os.environ.get("AB_WEIBO_SUBP", "")
+WB_TWM = os.environ.get("AB_WEIBO_TWM", "")
+WB_COOKIE = "SUB=%s; SUBP=%s; _T_WM=%s" % (WB_SUB, WB_SUBP, WB_TWM) if WB_SUB else ""
 
 
 def now_str():
@@ -141,6 +165,143 @@ def send_alert(nick, douyin_id, test=False):
         method="POST")
     with urllib.request.urlopen(req, timeout=15) as r:
         return r.status, read_body(r).decode("utf-8", "ignore")[:200]
+
+
+def load_weibo_state():
+    try:
+        with open(WEIBO_STATE_FILE) as f:
+            s = json.load(f)
+        return s if isinstance(s, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_weibo_state(state):
+    try:
+        with open(WEIBO_STATE_FILE, "w") as f:
+            json.dump(state, f, ensure_ascii=False)
+    except Exception as e:
+        print("save weibo state ERR: %s" % e)
+
+
+def check_weibo_one(uid):
+    """手机端 getIndex，返回最新 10 条帖 ID 列表。ok=0（潮汐）或无帖子卡片（king）抛 ValueError 由调用方跳过；418/截断重试 1 次。"""
+    url = "https://m.weibo.cn/api/container/getIndex?type=uid&value=%s&containerid=107603%s" % (uid, uid)
+    headers = {"User-Agent": WEIBO_UA, "Referer": "https://m.weibo.cn/", "Cookie": WB_COOKIE,
+               "Accept": "application/json, text/plain, */*"}
+    for attempt in range(2):
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                body = read_body(r)
+        except urllib.error.HTTPError as e:
+            if e.code == 418 and attempt == 0:
+                time.sleep(5)
+                continue
+            raise
+        try:
+            d = json.loads(body.decode("utf-8", "ignore"))
+        except json.JSONDecodeError:
+            # 响应被截断（大包偶发），重试一次
+            if attempt == 0:
+                time.sleep(2)
+                continue
+            raise
+        if d.get("ok") != 1:
+            raise ValueError("ok=%s msg=%s" % (d.get("ok"), (d.get("msg") or "")[:20]))
+        cards = (d.get("data") or {}).get("cards") or []
+        ids = []
+        for c in cards:
+            m = c.get("mblog") or {}
+            mid = m.get("id")
+            if mid:
+                ids.append(str(mid))
+            if len(ids) >= 10:
+                break
+        if not ids:
+            raise ValueError("no mblog ids in cards")
+        return ids
+    raise ValueError("418 retry failed")
+
+
+def send_weibo_alert(nick, uid, post_id):
+    subject = "AB微博新帖提醒 %s" % nick
+    payload = {
+        "_subject": subject,
+        "_template": "table",
+        "昵称": nick,
+        "微博UID": uid,
+        "新帖ID": post_id,
+        "帖子链接": "https://weibo.com/%s/%s" % (uid, post_id),
+        "发现时间": now_str(),
+        "来源": "Abasthan微博巡查",
+    }
+    req = urllib.request.Request(
+        FORMSUBMIT_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": UA,
+                 "Referer": "https://formsubmit.co/"},
+        method="POST")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.status, read_body(r).decode("utf-8", "ignore")[:200]
+
+
+def weibo_main():
+    """微博动态巡查一轮：查 8 个号最新帖 ID，有新帖发邮件。没设 AB_WEIBO_SUB 时跳过（不报错，不影响直播）。"""
+    if not WB_SUB:
+        print("[weibo] skipped: AB_WEIBO_SUB not set")
+        return 0
+    if not ALERT_EMAIL and not TEST:
+        print("[weibo] FAIL: ALERT_EMAIL env not set")
+        return 1
+    now = datetime.now(timezone(timedelta(hours=8)))
+    mins = now.hour * 60 + now.minute
+    night = 120 <= mins < 510
+    accounts = [(n, u) for (n, u) in WEIBO_ACCOUNTS if (not night or u in WEIBO_NIGHT_ONLY)]
+    if night:
+        print("[weibo] night mode: only 2 accounts")
+    wb_start = time.time()
+    state = load_weibo_state()
+    checked = 0
+    new_posts = []
+    emailed = []
+    for i, (nick, uid) in enumerate(accounts):
+        if time.time() - wb_start > WEIBO_TIME_BUDGET:
+            print("[weibo] time budget hit, stopped after %d accounts" % checked)
+            break
+        if i > 0:
+            time.sleep(1.5)  # 号与号之间停一下，防 418
+        try:
+            ids = check_weibo_one(uid)
+        except Exception as e:
+            print("[weibo] %s: check ERR %s: %s" % (nick, type(e).__name__, str(e)[:60]))
+            continue
+        checked += 1
+        latest = ids[0]
+        prev = state.get(uid) or {}
+        watermark = prev.get("latest") or ""
+        if not watermark:
+            state[uid] = {"latest": latest, "nick": nick, "updated": now_str()}
+            print("[weibo] %s: baseline %s" % (nick, latest))
+        elif latest != watermark and int(latest) > int(watermark):
+            new_posts.append((nick, uid, latest))
+            if TEST:
+                print("[weibo] %s: NEW %s (would email, TEST mode)" % (nick, latest))
+            else:
+                try:
+                    code, resp = send_weibo_alert(nick, uid, latest)
+                    print("[weibo] %s: NEW %s, email sent code=%s" % (nick, latest, code))
+                    emailed.append(nick)
+                except Exception as e:
+                    print("[weibo] %s: NEW %s, email ERR %s: %s" % (nick, latest, type(e).__name__, str(e)[:80]))
+            state[uid] = {"latest": latest, "nick": nick, "updated": now_str()}
+        else:
+            state[uid] = {"latest": latest, "nick": nick, "updated": now_str()}
+            print("[weibo] %s: no new (%s)" % (nick, latest))
+        if not TEST:
+            save_weibo_state(state)
+    print("[weibo] done: checked=%d new=%s emailed=%s elapsed=%.1fs" % (checked, [n for n, _, _ in new_posts], emailed, time.time() - wb_start))
+    return 0
 
 
 def main(sentinel_only=False):
@@ -241,12 +402,16 @@ def start_health_server():
 
 def run_loop():
     # 常驻循环模式：每 120 秒一轮；第 0/5/10…轮全查 12 个号，其余轮只查哨兵 4 个号；单轮异常不杀进程
+    # 微博巡查跟直播全量同一轮（第 0/5/10…轮，每 10 分钟一次），没设 AB_WEIBO_SUB 时自动跳过
     print("worker start %s (loop: sentinels every 120s, full every 600s)" % now_str(), flush=True)
     start_health_server()
     round_no = 0
     while True:
         try:
-            main(sentinel_only=(round_no % 5 != 0))
+            is_full = (round_no % 5 == 0)
+            main(sentinel_only=(not is_full))
+            if is_full:
+                weibo_main()
         except Exception as e:
             print("loop ERR %s: %s" % (type(e).__name__, str(e)[:200]), flush=True)
         round_no += 1
@@ -258,4 +423,8 @@ if __name__ == "__main__":
     if os.environ.get("AB_LOOP", "") == "1":
         run_loop()
     else:
-        raise SystemExit(main())
+        rc = main()
+        # 单轮模式也跑一轮微博（测接口通不通；没设 AB_WEIBO_SUB 时自动跳过）
+        if rc == 0:
+            rc = weibo_main()
+        raise SystemExit(rc)
