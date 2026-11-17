@@ -1,4 +1,4 @@
-# 直播第三防线（Abasthan 定时任务版）
+# 直播第三防线（Abasthan 常驻版）
 # 12 个号一个脚本一次查完：哨兵 4 个先查，其余随后；开播才发邮件，没开播不发
 # 原理：ttwid + profile/other 接口读 live_status（1=开播，0=没播）
 # 状态记在脚本同目录的 ab_live_state.json；只在“刚开播”时发一次邮件，开着就不重复发
@@ -9,6 +9,7 @@
 # 每号只查一次不重试，45 秒没查完就停下（已查的照常记状态、照常发邮件）
 # 开关可用环境变量覆盖：AB_TEST=1 / AB_TEST_EMAIL=1 / AB_CLEAR_STATE=1
 # AB_LOOP=1：常驻循环模式（后台 Worker 用，每 10 分钟查一轮）；不设则只跑一轮退出
+# 循环模式会同时起一个极简 HTTP 健康检查服务（0.0.0.0:$PORT，默认 8080，/ 和 /health 返回 ok），供平台探活；单轮模式不起
 
 TEST = False        # True：只打印、不真发邮件（测 12 个号能不能查完）；确认后改 False
 TEST_EMAIL = False  # True：额外发一封测试邮件，验证发信通不通；确认后改 False
@@ -216,9 +217,33 @@ def main():
     return 0
 
 
+def start_health_server():
+    # 极简探活服务：只回 ok，让平台知道进程还活着（Web Service 形态部署时需要）
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    port = int(os.environ.get("PORT", "8080"))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    print("health server on :%d" % port, flush=True)
+
+
 def run_loop():
     # 后台 Worker 常驻模式：每 10 分钟查一轮，单轮异常不杀进程
     print("worker start %s (loop every 600s)" % now_str(), flush=True)
+    start_health_server()
     while True:
         try:
             main()

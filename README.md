@@ -1,14 +1,17 @@
-# 直播第三防线（Abasthan 后台 Worker 版）
+# 直播第三防线（Abasthan 常驻版）
 
 每 10 分钟查 12 个抖音号有没有开播，有人刚开播就发邮件提醒。
 
 ## 怎么跑
 
-Abasthan 上建 Background Worker（仪表盘里没有 Cron Job 入口，定时任务建不了）：
+Abasthan 上建 Web Service：
 
 - Runtime：Python 3.12
 - Start Command：`python check_all_live_ab.py`
 - 环境变量：`AB_LOOP=1`（常驻循环模式，每 10 分钟查一轮）、`ALERT_EMAIL`（收提醒的邮箱，必填，在仪表盘里设，不写进仓库）
+- 脚本自带健康检查服务（`/` 和 `/health` 回 ok），供平台探活
+
+为什么是 Web Service：仪表盘里没有 Cron Job 入口，定时任务建不了；Background Worker 也建不了——2026-11-17 两次提交都报平台错误 `E11000 duplicate key error ... subdomain_1 dup key: { subdomain: null }`，是平台的 bug，只能等它修或等删掉的应用记录清干净再试。Web Service 会分到一个真实子域名，绕开这个错。
 - 套餐：Free（每账号只有 1 个免费名额）
 
 ## 文件
