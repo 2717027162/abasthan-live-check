@@ -1,5 +1,5 @@
 # 直播第四防线（Abasthan 常驻版）
-# 12 个号一个脚本一次查完：哨兵 4 个先查，其余随后；开播才发邮件，没开播不发
+# 12 个号一个脚本查完：哨兵 4 个（坏坏哦小号/板栗饼/余霜/小钰）每 2 分钟查一轮，12 个号每 10 分钟全查一轮；开播才发邮件，没开播不发
 # 原理：ttwid + profile/other 接口读 live_status（1=开播，0=没播）
 # 状态记在脚本同目录的 ab_live_state.json；只在“刚开播”时发一次邮件，开着就不重复发
 # 注意：状态记在容器里的 ab_live_state.json；服务重启/重新部署后状态可能丢，启动时会打印 state file 是否存在、几条
@@ -9,7 +9,7 @@
 # 每号只查一次不重试，每轮 300 秒没查完就停下（已查的照常记状态、照常发邮件）
 # 测试开关（TEST/TEST_EMAIL/CLEAR_STATE）只能改上面代码里的常量，不读环境变量——
 # Abasthan 删了的环境变量在容器里清不掉，2026-11-17 AB_TEST_EMAIL 因此每轮误发测试邮件
-# AB_LOOP=1：常驻循环模式（Web Service 用，每 10 分钟查一轮）；不设则只跑一轮退出
+# AB_LOOP=1：常驻循环模式（Web Service 用，哨兵每 2 分钟一轮、全量每 10 分钟一轮）；不设则只跑一轮全量退出
 # 循环模式会同时起一个极简 HTTP 健康检查服务（0.0.0.0:$PORT，默认 8080，/ 和 /health 返回 ok），供平台探活；单轮模式不起
 
 TEST = False        # True：只打印、不真发邮件（测 12 个号能不能查完）；确认后改 False
@@ -143,7 +143,7 @@ def send_alert(nick, douyin_id, test=False):
         return r.status, read_body(r).decode("utf-8", "ignore")[:200]
 
 
-def main():
+def main(sentinel_only=False):
     now = datetime.now(timezone(timedelta(hours=8)))
     mins = now.hour * 60 + now.minute
     if 120 <= mins < 510:
@@ -171,7 +171,8 @@ def main():
     checked = 0
     live_now = []
     emailed = []
-    for douyin_id, sec_uid in ACCOUNTS:
+    accounts = ACCOUNTS[:4] if sentinel_only else ACCOUNTS
+    for douyin_id, sec_uid in accounts:
         if time.time() - round_start > TIME_BUDGET:
             print("time budget hit, stopped after %d accounts" % checked)
             break
@@ -211,7 +212,7 @@ def main():
             print("test email: code=%s resp=%s" % (code, resp[:200]))
         except Exception as e:
             print("test email ERR %s: %s" % (type(e).__name__, str(e)[:120]))
-    print("done: checked=%d live=%s emailed=%s elapsed=%.1fs" % (checked, live_now, emailed, time.time() - round_start))
+    print("done: [%s] checked=%d live=%s emailed=%s elapsed=%.1fs" % ("sentinel" if sentinel_only else "full", checked, live_now, emailed, time.time() - round_start))
     return 0
 
 
@@ -239,16 +240,18 @@ def start_health_server():
 
 
 def run_loop():
-    # 常驻循环模式：每 10 分钟查一轮，单轮异常不杀进程
-    print("worker start %s (loop every 600s)" % now_str(), flush=True)
+    # 常驻循环模式：每 120 秒一轮；第 0/5/10…轮全查 12 个号，其余轮只查哨兵 4 个号；单轮异常不杀进程
+    print("worker start %s (loop: sentinels every 120s, full every 600s)" % now_str(), flush=True)
     start_health_server()
+    round_no = 0
     while True:
         try:
-            main()
+            main(sentinel_only=(round_no % 5 != 0))
         except Exception as e:
             print("loop ERR %s: %s" % (type(e).__name__, str(e)[:200]), flush=True)
-        print("sleep 600s, next run ~%s" % now_str(), flush=True)
-        time.sleep(600)
+        round_no += 1
+        print("sleep 120s, next run ~%s" % now_str(), flush=True)
+        time.sleep(120)
 
 
 if __name__ == "__main__":
