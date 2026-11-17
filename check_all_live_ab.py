@@ -7,7 +7,8 @@
 # formsubmit ajax 必须带 Referer 头（https://formsubmit.co/），不带会被拒（"HTML files" 报错）；Origin 头没用
 # TEST 模式不写状态文件（免得测试把“在播”记进去，正式跑时漏发提醒）；CLEAR_STATE 一次性清掉旧状态
 # 每号只查一次不重试，每轮 300 秒没查完就停下（已查的照常记状态、照常发邮件）
-# 开关可用环境变量覆盖：AB_TEST=1 / AB_TEST_EMAIL=1 / AB_CLEAR_STATE=1
+# 测试开关（TEST/TEST_EMAIL/CLEAR_STATE）只能改上面代码里的常量，不读环境变量——
+# Abasthan 删了的环境变量在容器里清不掉，2026-11-17 AB_TEST_EMAIL 因此每轮误发测试邮件
 # AB_LOOP=1：常驻循环模式（Web Service 用，每 10 分钟查一轮）；不设则只跑一轮退出
 # 循环模式会同时起一个极简 HTTP 健康检查服务（0.0.0.0:$PORT，默认 8080，/ 和 /health 返回 ok），供平台探活；单轮模式不起
 
@@ -47,10 +48,7 @@ from datetime import datetime, timezone, timedelta
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-# 环境变量覆盖开关；状态文件放在脚本同目录
-TEST = TEST or os.environ.get("AB_TEST", "") == "1"
-TEST_EMAIL = TEST_EMAIL or os.environ.get("AB_TEST_EMAIL", "") == "1"
-CLEAR_STATE = CLEAR_STATE or os.environ.get("AB_CLEAR_STATE", "") == "1"
+# 状态文件放在脚本同目录；ALERT_EMAIL / AB_LOOP 仍走环境变量（部署时设，不写进仓库）
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ab_live_state.json")
 ALERT_EMAIL = os.environ.get("ALERT_EMAIL", ALERT_EMAIL)
 FORMSUBMIT_URL = "https://formsubmit.co/ajax/" + ALERT_EMAIL
