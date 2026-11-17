@@ -1,14 +1,14 @@
-# 直播第三防线（Abasthan 常驻版）
+# 直播第四防线（Abasthan 常驻版）
 # 12 个号一个脚本一次查完：哨兵 4 个先查，其余随后；开播才发邮件，没开播不发
 # 原理：ttwid + profile/other 接口读 live_status（1=开播，0=没播）
 # 状态记在脚本同目录的 ab_live_state.json；只在“刚开播”时发一次邮件，开着就不重复发
-# 注意：Abasthan 定时任务每次跑可能是全新容器，状态文件不一定留得住；启动时会打印 state file 是否存在、几条
+# 注意：状态记在容器里的 ab_live_state.json；服务重启/重新部署后状态可能丢，启动时会打印 state file 是否存在、几条
 # 发邮件走 formsubmit 免注册接口，目标是 Aw 的新号 Gmail（该地址已在 LightVela 线激活过，直接通）
 # formsubmit ajax 必须带 Referer 头（https://formsubmit.co/），不带会被拒（"HTML files" 报错）；Origin 头没用
 # TEST 模式不写状态文件（免得测试把“在播”记进去，正式跑时漏发提醒）；CLEAR_STATE 一次性清掉旧状态
-# 每号只查一次不重试，45 秒没查完就停下（已查的照常记状态、照常发邮件）
+# 每号只查一次不重试，每轮 300 秒没查完就停下（已查的照常记状态、照常发邮件）
 # 开关可用环境变量覆盖：AB_TEST=1 / AB_TEST_EMAIL=1 / AB_CLEAR_STATE=1
-# AB_LOOP=1：常驻循环模式（后台 Worker 用，每 10 分钟查一轮）；不设则只跑一轮退出
+# AB_LOOP=1：常驻循环模式（Web Service 用，每 10 分钟查一轮）；不设则只跑一轮退出
 # 循环模式会同时起一个极简 HTTP 健康检查服务（0.0.0.0:$PORT，默认 8080，/ 和 /health 返回 ok），供平台探活；单轮模式不起
 
 TEST = False        # True：只打印、不真发邮件（测 12 个号能不能查完）；确认后改 False
@@ -16,7 +16,7 @@ TEST_EMAIL = False  # True：额外发一封测试邮件，验证发信通不通
 CLEAR_STATE = False  # True：本轮开始先清掉旧状态文件；正式跑时改 False
 
 ALERT_EMAIL = ""  # 收提醒的邮箱：部署时在环境变量里设 ALERT_EMAIL，不写进仓库
-TIME_BUDGET = 45    # 秒，查到这里就停
+TIME_BUDGET = 300   # 秒，每轮查到这里就停（单轮模式沿用 LightVela 的 45 秒太紧，循环模式无 60 秒硬上限）
 
 ACCOUNTS = [
     ("bkppszd111_", "MS4wLjABAAAAZj_-JgiSed_n6TT0vCDCzN06lOOZlEwRFcT696-5d7k"),
@@ -46,7 +46,6 @@ import http.cookiejar
 from datetime import datetime, timezone, timedelta
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-START = time.time()
 
 # 环境变量覆盖开关；状态文件放在脚本同目录
 TEST = TEST or os.environ.get("AB_TEST", "") == "1"
@@ -132,7 +131,7 @@ def send_alert(nick, douyin_id, test=False):
         "昵称": nick,
         "抖音号": douyin_id,
         "发现时间": now_str(),
-        "来源": "Abasthan第三防线",
+        "来源": "Abasthan第四防线",
     }
     if test:
         payload["备注"] = "这是一封测试邮件，验证发信通不通，不是真开播"
@@ -152,6 +151,7 @@ def main():
     if 120 <= mins < 510:
         print("night pause, skip")
         return 0
+    round_start = time.time()  # 每轮重设计时（循环模式下不能用进程启动时间，否则第二轮起还没查就超预算）
     if not TEST and not ALERT_EMAIL:
         print("FAIL: ALERT_EMAIL env not set")
         return 1
@@ -174,7 +174,7 @@ def main():
     live_now = []
     emailed = []
     for douyin_id, sec_uid in ACCOUNTS:
-        if time.time() - START > TIME_BUDGET:
+        if time.time() - round_start > TIME_BUDGET:
             print("time budget hit, stopped after %d accounts" % checked)
             break
         try:
@@ -213,7 +213,7 @@ def main():
             print("test email: code=%s resp=%s" % (code, resp[:200]))
         except Exception as e:
             print("test email ERR %s: %s" % (type(e).__name__, str(e)[:120]))
-    print("done: checked=%d live=%s emailed=%s elapsed=%.1fs" % (checked, live_now, emailed, time.time() - START))
+    print("done: checked=%d live=%s emailed=%s elapsed=%.1fs" % (checked, live_now, emailed, time.time() - round_start))
     return 0
 
 
@@ -241,7 +241,7 @@ def start_health_server():
 
 
 def run_loop():
-    # 后台 Worker 常驻模式：每 10 分钟查一轮，单轮异常不杀进程
+    # 常驻循环模式：每 10 分钟查一轮，单轮异常不杀进程
     print("worker start %s (loop every 600s)" % now_str(), flush=True)
     start_health_server()
     while True:
